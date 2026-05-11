@@ -1,131 +1,353 @@
-import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import cors from "cors";
-import Anthropic from "@anthropic-ai/sdk";
+import pdfParse from "pdf-parse";
 
 const app = express();
 const PORT = 3001;
-
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error("\n  ✗  ANTHROPIC_API_KEY is not set. Create a .env file with:\n     ANTHROPIC_API_KEY=sk-ant-...\n");
-  process.exit(1);
-}
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-const client = new Anthropic();
-
 app.use(cors({ origin: ["http://localhost:5173", "http://localhost:4173"] }));
 app.use(express.json());
 
-const SYSTEM_PROMPT = `You are an elite portfolio reviewer with 20+ years of combined experience as a hiring manager, senior recruiter, and creative director at top-tier tech companies, agencies, and startups. You have personally reviewed thousands of portfolios and know precisely what makes a candidate stand out — or get filtered out — in the first 10 seconds.
+// ── Types ────────────────────────────────────────────────────────────────────
 
-Analyze the provided portfolio with unflinching honesty. Score each dimension critically; reserve 85+ for genuinely exceptional work. A score of 75 is solid, 60 is average.
-
-Return ONLY a valid JSON object with this exact structure — no markdown fences, no explanation, just the JSON:
-{
-  "overall_score": <integer 0-100>,
-  "category_scores": {
-    "visual_design": <integer 0-100>,
-    "project_depth": <integer 0-100>,
-    "narrative": <integer 0-100>,
-    "impact_metrics": <integer 0-100>
-  },
-  "recruiter_notes": [<3-5 short, brutally honest observations a real recruiter would write in their screening notes>],
-  "shortlist_likelihood": "<exactly one of: very likely | likely | unlikely | very unlikely>",
-  "shortlist_stars": <integer 1-5>,
-  "summary": "<2-3 sentence candid overall assessment>",
-  "recommendations": [
-    {
-      "title": "<short, specific action title>",
-      "description": "<concrete, actionable advice — no generic platitudes>",
-      "priority": "<exactly one of: high | medium | low>"
-    }
-  ]
+interface ReviewData {
+  overall_score: number;
+  category_scores: {
+    visual_design: number;
+    project_depth: number;
+    narrative: number;
+    impact_metrics: number;
+  };
+  recruiter_notes: string[];
+  shortlist_likelihood: "very likely" | "likely" | "unlikely" | "very unlikely";
+  shortlist_stars: number;
+  summary: string;
+  recommendations: Array<{
+    title: string;
+    description: string;
+    priority: "high" | "medium" | "low";
+  }>;
 }
 
-Include 3-5 recommendations sorted by priority descending.`;
+// ── Heuristic scoring ────────────────────────────────────────────────────────
 
-// ── Helper: build content blocks ────────────────────────────────────────────
+const TECH_KEYWORDS = [
+  "javascript","typescript","python","react","vue","angular","node","express",
+  "next","nuxt","svelte","tailwind","css","html","sql","postgres","mysql",
+  "mongodb","redis","docker","kubernetes","aws","gcp","azure","git","github",
+  "graphql","rest","api","backend","frontend","fullstack","mobile","ios",
+  "android","flutter","swift","kotlin","java","go","rust","c++","c#",
+  "machine learning","ml","ai","tensorflow","pytorch","pandas","numpy",
+  "figma","sketch","adobe","ux","ui","design","prototype","wireframe",
+];
 
-type ContentBlock =
-  | Anthropic.TextBlockParam
-  | Anthropic.ImageBlockParam
-  | { type: "document"; source: { type: "base64"; media_type: "application/pdf"; data: string } };
+const PROJECT_KEYWORDS = [
+  "project","built","developed","created","designed","implemented","launched",
+  "shipped","deployed","engineered","architected","led","built","contributed",
+  "open source","case study","portfolio","app","website","platform","system",
+  "tool","library","framework","feature","product","service",
+];
 
-async function buildContentBlocks(
-  file: Express.Multer.File | undefined,
-  url: string,
-  reviewType: string,
-  customPrompt: string
-): Promise<ContentBlock[]> {
-  const blocks: ContentBlock[] = [];
+const IMPACT_PATTERN = /(\d[\d,]*\s*(%|x|×|\+|k\b|m\b|million|thousand|hundred|users?|customers?|clients?|downloads?|installs?|stars?|visits?|requests?|transactions?|revenue|sales|conversions?|reduction|increase|improvement|faster|times))/gi;
 
-  const header = [
-    `Review Type: ${reviewType}`,
-    customPrompt ? `Focus area: ${customPrompt}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+const METRIC_NUMBERS = /\b\d{2,}[\d,]*\b/g;
 
-  blocks.push({ type: "text", text: `Please review this portfolio.\n${header}` });
+const CONTACT_PATTERN = /(linkedin|github|twitter|behance|dribbble|mailto:|@\w+\.\w+|contact|hire me|get in touch)/i;
 
-  if (file) {
-    const base64 = file.buffer.toString("base64");
-    const mime = file.mimetype;
+const ABOUT_PATTERN = /(about\s*me|who\s*i\s*am|bio|background|introduction|i\s+am\s+a|i'm\s+a|my\s+name|hello,?\s*i|hi,?\s*i)/i;
 
-    if (mime === "application/pdf") {
-      blocks.push({
-        type: "document",
-        source: { type: "base64", media_type: "application/pdf", data: base64 },
-      });
-    } else if (
-      mime === "image/jpeg" ||
-      mime === "image/png" ||
-      mime === "image/gif" ||
-      mime === "image/webp"
-    ) {
-      blocks.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: mime as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-          data: base64,
-        },
-      });
-    }
-  } else if (url) {
-    try {
-      const res = await fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; PortfoliaBot/1.0)" },
-        signal: AbortSignal.timeout(12_000),
-      });
-      const html = await res.text();
-      // Strip HTML, collapse whitespace, cap at 10K chars
-      const text = html
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 10_000);
-      blocks.push({
-        type: "text",
-        text: `Portfolio URL: ${url}\n\nExtracted page content:\n${text}`,
-      });
-    } catch {
-      blocks.push({
-        type: "text",
-        text: `Portfolio URL: ${url}\n\nNote: The page could not be fetched automatically. Please evaluate based on the URL and any context available.`,
-      });
-    }
+const HEADLINE_PATTERN = /(full[\s-]?stack|frontend|backend|software\s*engineer|web\s*developer|product\s*designer|ux\s*designer|data\s*scientist|devops|mobile\s*developer|creative\s*director|product\s*manager)/i;
+
+function clamp(n: number, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function scorePortfolioText(
+  text: string,
+  html: string,
+  isUrl: boolean,
+  reviewType: string
+): ReviewData {
+  const lower = text.toLowerCase();
+
+  // ── Visual Design ──────────────────────────────────────────────────────────
+  let vd = 20;
+  if (isUrl) {
+    if (/<meta[^>]+viewport/i.test(html)) vd += 15;
+    if (/<meta[^>]+og:image/i.test(html)) vd += 10;
+    if (/favicon|apple-touch-icon/i.test(html)) vd += 5;
+    if (/<(nav|main|section|article|header|footer)/i.test(html)) vd += 20;
+    const imgCount = (html.match(/<img\b/gi) ?? []).length;
+    vd += imgCount >= 8 ? 20 : imgCount >= 4 ? 14 : imgCount >= 1 ? 8 : 0;
+    if (/tailwind|bootstrap|material|chakra/i.test(html)) vd += 5;
+    if (/<link[^>]+stylesheet/i.test(html)) vd += 5;
+  } else {
+    vd = 45; // Can't assess visual design from PDF/image — give neutral
   }
 
-  return blocks;
+  // ── Project Depth ──────────────────────────────────────────────────────────
+  let pd = 10;
+  const projectHits = PROJECT_KEYWORDS.reduce(
+    (n, kw) => n + (lower.split(kw).length - 1),
+    0
+  );
+  pd += clamp(projectHits * 5, 0, 35);
+
+  const techFound = TECH_KEYWORDS.filter((kw) => lower.includes(kw));
+  pd += clamp(techFound.length * 4, 0, 30);
+
+  if (/github\.com|gitlab\.com/i.test(text)) pd += 12;
+  if (/(live demo|view project|see it live|demo link)/i.test(lower)) pd += 8;
+  if (/(problem|solution|challenge|result|outcome|impact)/i.test(lower)) pd += 10;
+
+  // ── Narrative ──────────────────────────────────────────────────────────────
+  let na = 10;
+  if (ABOUT_PATTERN.test(lower)) na += 22;
+  if (HEADLINE_PATTERN.test(lower)) na += 15;
+  if (CONTACT_PATTERN.test(lower)) na += 12;
+  if (/linkedin\.com/i.test(lower)) na += 8;
+  const wordCount = text.trim().split(/\s+/).length;
+  na += wordCount > 400 ? 20 : wordCount > 150 ? 12 : wordCount > 50 ? 6 : 0;
+  if (/(passion|love to|excited about|speciali[sz]e|focus on)/i.test(lower)) na += 8;
+
+  // ── Impact Metrics ─────────────────────────────────────────────────────────
+  let im = 10;
+  const impactMatches = text.match(IMPACT_PATTERN) ?? [];
+  const numberMatches = text.match(METRIC_NUMBERS) ?? [];
+  im += clamp(impactMatches.length * 14, 0, 60);
+  im += clamp(numberMatches.length * 2, 0, 20);
+  if (/%/.test(text)) im += 10;
+
+  // Adjust weights by review type
+  if (/software|engineering|backend|frontend|devops/i.test(reviewType)) {
+    pd = clamp(pd * 1.1);
+  } else if (/design|ux/i.test(reviewType)) {
+    vd = clamp(vd * 1.15);
+    na = clamp(na * 1.05);
+  } else if (/data|analytics|machine learning/i.test(reviewType)) {
+    pd = clamp(pd * 1.1);
+    im = clamp(im * 1.1);
+  } else if (/product management/i.test(reviewType)) {
+    na = clamp(na * 1.1);
+    im = clamp(im * 1.1);
+  }
+
+  const category_scores = {
+    visual_design: clamp(vd),
+    project_depth: clamp(pd),
+    narrative: clamp(na),
+    impact_metrics: clamp(im),
+  };
+
+  const overall_score = clamp(
+    category_scores.visual_design * 0.25 +
+      category_scores.project_depth * 0.30 +
+      category_scores.narrative * 0.25 +
+      category_scores.impact_metrics * 0.20
+  );
+
+  // ── Shortlist likelihood ───────────────────────────────────────────────────
+  const shortlist_likelihood: ReviewData["shortlist_likelihood"] =
+    overall_score >= 78
+      ? "very likely"
+      : overall_score >= 62
+        ? "likely"
+        : overall_score >= 46
+          ? "unlikely"
+          : "very unlikely";
+
+  const shortlist_stars =
+    overall_score >= 85 ? 5 : overall_score >= 72 ? 4 : overall_score >= 58 ? 3 : overall_score >= 44 ? 2 : 1;
+
+  // ── Recruiter notes ────────────────────────────────────────────────────────
+  const notes: string[] = [];
+
+  if (techFound.length >= 6) {
+    notes.push(`Strong technical breadth — ${techFound.slice(0, 5).join(", ")} and more are clearly evidenced.`);
+  } else if (techFound.length >= 2) {
+    notes.push(`Tech stack is visible (${techFound.slice(0, 3).join(", ")}), but could be more prominent.`);
+  } else {
+    notes.push("No clear technology stack detected — recruiters scan for this in the first few seconds.");
+  }
+
+  if (impactMatches.length >= 4) {
+    notes.push(`Good use of quantified results — ${impactMatches.length} metric${impactMatches.length > 1 ? "s" : ""} found, which catches recruiter attention.`);
+  } else if (impactMatches.length >= 1) {
+    notes.push(`Some numbers present (${impactMatches.slice(0, 2).join(", ")}), but more quantified impact would strengthen the case.`);
+  } else {
+    notes.push("No measurable outcomes detected — vague descriptions don't hold recruiter attention.");
+  }
+
+  if (HEADLINE_PATTERN.test(lower)) {
+    notes.push("Role identity is clear from the headline — recruiter can immediately categorize this candidate.");
+  } else {
+    notes.push("No clear role/title visible above the fold — first 3 seconds are wasted if context is missing.");
+  }
+
+  if (/github\.com/i.test(text)) {
+    notes.push("GitHub link present — recruiters for technical roles will check this.");
+  } else if (/software|engineering|data/i.test(reviewType)) {
+    notes.push("No GitHub link found — for a technical role this is a significant gap.");
+  }
+
+  if (projectHits >= 8) {
+    notes.push("Multiple projects are referenced, suggesting a solid body of work.");
+  } else if (projectHits <= 2) {
+    notes.push("Very few project references — hard to assess depth from so little content.");
+  }
+
+  // ── Recommendations ────────────────────────────────────────────────────────
+  const recs: ReviewData["recommendations"] = [];
+
+  if (im < 50) {
+    recs.push({
+      title: "Add quantified impact to every project",
+      description:
+        "Replace vague descriptions like "improved performance" with concrete numbers: "reduced load time by 40%", "grew user base from 200 to 2,000", or "shipped 3 features that drove 15% revenue uplift". One number is worth ten adjectives.",
+      priority: "high",
+    });
+  }
+
+  if (!HEADLINE_PATTERN.test(lower)) {
+    recs.push({
+      title: "Put your role title above the fold",
+      description:
+        "Recruiters scan dozens of portfolios in minutes. A clear headline like "Full-Stack Engineer · TypeScript · React" tells them in under 3 seconds whether to keep reading. Without it, most won't scroll.",
+      priority: "high",
+    });
+  }
+
+  if (techFound.length < 4) {
+    recs.push({
+      title: "Make your tech stack scannable",
+      description:
+        "Add a dedicated skills/tools section with logos or a clean list. Recruiters filter by stack — if yours isn't visible at a glance, you'll be missed even if you have the skills.",
+      priority: recs.length < 2 ? "high" : "medium",
+    });
+  }
+
+  if (!/github\.com/i.test(text) && /software|engineering|data|frontend|backend|devops/i.test(reviewType)) {
+    recs.push({
+      title: "Link your GitHub profile prominently",
+      description:
+        "For technical roles, a GitHub profile with active commits is stronger evidence than any description. Put it in the header, not buried in the footer.",
+      priority: "medium",
+    });
+  }
+
+  if (pd < 55) {
+    recs.push({
+      title: "Go deeper on 2–3 key projects",
+      description:
+        "Surface-level project lists don't differentiate you. Pick your best 2–3 projects and add a brief case study: the problem, your specific contribution, the technology choices made, and the measurable outcome.",
+      priority: "medium",
+    });
+  }
+
+  if (!ABOUT_PATTERN.test(lower)) {
+    recs.push({
+      title: "Add a concise bio",
+      description:
+        "A 2–3 sentence bio humanizes you and frames the rest of the portfolio. It should answer: who you are, what you're best at, and what kind of role you're targeting.",
+      priority: "medium",
+    });
+  }
+
+  if (!CONTACT_PATTERN.test(lower)) {
+    recs.push({
+      title: "Add visible contact information",
+      description:
+        "If a recruiter wants to reach you after viewing the portfolio, don't make them search. Email, LinkedIn, or a contact form should be one click away from every page.",
+      priority: "low",
+    });
+  }
+
+  if (isUrl && (html.match(/<img\b/gi) ?? []).length < 3) {
+    recs.push({
+      title: "Add more visual evidence",
+      description:
+        "Screenshots, mockups, architecture diagrams, or demo GIFs let recruiters see your work without reading. Aim for at least one strong visual per project.",
+      priority: "low",
+    });
+  }
+
+  // Cap at 5 recs, sorted high → medium → low
+  const priorityOrder = { high: 0, medium: 1, low: 2 };
+  const recommendations = recs
+    .sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority])
+    .slice(0, 5);
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  const strengths = [];
+  const weaknesses = [];
+  if (techFound.length >= 4) strengths.push("a visible tech stack");
+  if (impactMatches.length >= 3) strengths.push("quantified results");
+  if (HEADLINE_PATTERN.test(lower)) strengths.push("a clear role identity");
+  if (/github\.com/i.test(text)) strengths.push("GitHub presence");
+  if (pd >= 60) strengths.push("solid project depth");
+
+  if (im < 40) weaknesses.push("lacks measurable outcomes");
+  if (na < 40) weaknesses.push("weak personal narrative");
+  if (pd < 40) weaknesses.push("insufficient project depth");
+  if (!HEADLINE_PATTERN.test(lower)) weaknesses.push("missing role clarity");
+
+  const summary =
+    strengths.length > 0 && weaknesses.length > 0
+      ? `This portfolio shows ${strengths.join(" and ")} but ${weaknesses.join(" and ")}. With targeted improvements on quantified impact and clearer positioning, shortlist chances would improve significantly.`
+      : strengths.length > 0
+        ? `A well-structured portfolio with ${strengths.join(", ")}. Focus on adding more quantified outcomes to convert interest into interviews.`
+        : `This portfolio needs significant work before it will consistently pass recruiter screens — the key gaps are ${weaknesses.slice(0, 2).join(" and ")}.`;
+
+  return {
+    overall_score,
+    category_scores,
+    recruiter_notes: notes.slice(0, 5),
+    shortlist_likelihood,
+    shortlist_stars,
+    summary,
+    recommendations,
+  };
+}
+
+// ── Content extraction ───────────────────────────────────────────────────────
+
+async function extractText(
+  file: Express.Multer.File | undefined,
+  url: string
+): Promise<{ text: string; html: string; isUrl: boolean }> {
+  if (file) {
+    if (file.mimetype === "application/pdf") {
+      try {
+        const parsed = await pdfParse(file.buffer);
+        return { text: parsed.text, html: "", isUrl: false };
+      } catch {
+        return { text: file.originalname, html: "", isUrl: false };
+      }
+    }
+    // Image — can't extract text; use filename as minimal signal
+    return { text: file.originalname, html: "", isUrl: false };
+  }
+
+  // URL
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; PortfoliaBot/1.0)" },
+    signal: AbortSignal.timeout(12_000),
+  });
+  const html = await res.text();
+  const text = html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 15_000);
+  return { text, html, isUrl: true };
 }
 
 // ── POST /api/review ─────────────────────────────────────────────────────────
@@ -133,53 +355,20 @@ async function buildContentBlocks(
 app.post("/api/review", upload.single("file"), async (req, res) => {
   try {
     const reviewType: string = req.body.reviewType ?? "General Portfolio Review";
-    const customPrompt: string = req.body.customPrompt ?? "";
-    const url: string = req.body.url ?? "";
+    const url: string = (req.body.url ?? "").trim();
     const file = req.file;
 
-    if (!file && !url.trim()) {
+    if (!file && !url) {
       res.status(400).json({ error: "Provide a file or URL." });
       return;
     }
 
-    const content = await buildContentBlocks(file, url, reviewType, customPrompt);
-
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 2048,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: content as Anthropic.ContentBlockParam[] }],
-    });
-
-    const textBlock = response.content.find((b) => b.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
-      res.status(500).json({ error: "No text response from Claude." });
-      return;
-    }
-
-    // Extract JSON — handle markdown fences and any leading/trailing prose
-    let raw = textBlock.text.trim();
-    // Strip ```json ... ``` fences
-    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-    // If there's still non-JSON text before the object, find the first { ... }
-    const jsonStart = raw.indexOf("{");
-    const jsonEnd = raw.lastIndexOf("}");
-    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-      raw = raw.slice(jsonStart, jsonEnd + 1);
-    }
-    const review = JSON.parse(raw);
+    const { text, html, isUrl } = await extractText(file, url);
+    const review = scorePortfolioText(text, html, isUrl, reviewType);
     res.json(review);
   } catch (err) {
     console.error("[/api/review]", err);
-    if (err instanceof Anthropic.APIError) {
-      res.status(err.status ?? 500).json({ error: err.message });
-      return;
-    }
-    if (err instanceof SyntaxError) {
-      res.status(500).json({ error: "AI returned malformed JSON — please retry." });
-      return;
-    }
-    res.status(500).json({ error: "Failed to generate review." });
+    res.status(500).json({ error: "Could not fetch or analyze the portfolio. Check the URL and try again." });
   }
 });
 
