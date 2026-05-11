@@ -2,9 +2,14 @@ import express from "express";
 import multer from "multer";
 import cors from "cors";
 import pdfParse from "pdf-parse";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIST = path.join(__dirname, "../dist");
 
 const app = express();
-const PORT = 3001;
+const PORT = Number(process.env.PORT ?? 3001);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -372,6 +377,13 @@ app.post("/api/review", upload.single("file"), async (req, res) => {
   }
 });
 
+// Serve built frontend in production
+import fs from "fs";
+if (fs.existsSync(DIST)) {
+  app.use(express.static(DIST));
+  app.get("*", (_req, res) => res.sendFile(path.join(DIST, "index.html")));
+}
+
 app.listen(PORT, () => {
-  console.log(`\n  Portfolia API  →  http://localhost:${PORT}\n`);
+  console.log(`\n  Portfolia  →  http://localhost:${PORT}\n`);
 });
