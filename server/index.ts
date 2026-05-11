@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import cors from "cors";
@@ -5,6 +6,11 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const app = express();
 const PORT = 3001;
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error("\n  ✗  ANTHROPIC_API_KEY is not set. Create a .env file with:\n     ANTHROPIC_API_KEY=sk-ant-...\n");
+  process.exit(1);
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -151,8 +157,16 @@ app.post("/api/review", upload.single("file"), async (req, res) => {
       return;
     }
 
-    // Strip any accidental markdown fences
-    const raw = textBlock.text.replace(/^```json\s*/i, "").replace(/```\s*$/, "").trim();
+    // Extract JSON — handle markdown fences and any leading/trailing prose
+    let raw = textBlock.text.trim();
+    // Strip ```json ... ``` fences
+    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+    // If there's still non-JSON text before the object, find the first { ... }
+    const jsonStart = raw.indexOf("{");
+    const jsonEnd = raw.lastIndexOf("}");
+    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+      raw = raw.slice(jsonStart, jsonEnd + 1);
+    }
     const review = JSON.parse(raw);
     res.json(review);
   } catch (err) {
