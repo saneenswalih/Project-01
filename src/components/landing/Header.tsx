@@ -24,7 +24,7 @@ export default function Header() {
     <motion.header
       initial={{ y: -20, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
-      transition={{ duration: 0.5, ease: "easeOut" }}
+      transition={{ duration: 0.5, ease: "easeOut" as const }}
       className="fixed top-0 inset-x-0 z-50 flex justify-center"
       style={{ paddingTop: "12px" }}
     >

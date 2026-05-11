@@ -7,7 +7,9 @@ import {
   Sparkles,
   FileText,
   Loader2,
+  AlertCircle,
 } from "lucide-react";
+import type { ReviewData } from "@/types/review";
 
 const REVIEW_TYPES = [
   "General Portfolio Review",
@@ -23,13 +25,18 @@ const REVIEW_TYPES = [
   "Creative Direction",
 ];
 
-export default function UploadCard() {
+interface Props {
+  onReview: (data: ReviewData) => void;
+}
+
+export default function UploadCard({ onReview }: Props) {
   const [dragging, setDragging] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState("");
   const [reviewType, setReviewType] = useState(REVIEW_TYPES[0]);
-  const [prompt, setPrompt] = useState("");
+  const [customPrompt, setCustomPrompt] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"file" | "url">("file");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -37,14 +44,40 @@ export default function UploadCard() {
     e.preventDefault();
     setDragging(false);
     const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
+    if (f) { setFile(f); setError(null); }
   }, []);
 
-  function handleGenerate() {
-    if ((!file && !url) || loading) return;
+  async function handleGenerate() {
+    if ((!file && !url.trim()) || loading) return;
     setLoading(true);
-    setTimeout(() => setLoading(false), 3200);
+    setError(null);
+
+    try {
+      const body = new FormData();
+      body.append("reviewType", reviewType);
+      body.append("customPrompt", customPrompt);
+      if (file) {
+        body.append("file", file);
+      } else {
+        body.append("url", url.trim());
+      }
+
+      const res = await fetch("/api/review", { method: "POST", body });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error ?? "Review failed — please try again.");
+      }
+
+      onReview(data as ReviewData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
   }
+
+  const canSubmit = (file || url.trim()) && !loading;
 
   return (
     <section id="upload" className="relative px-4 pb-24">
@@ -52,7 +85,7 @@ export default function UploadCard() {
         initial={{ opacity: 0, y: 32 }}
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, amount: 0.2 }}
-        transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+        transition={{ duration: 0.65, ease: "easeOut" as const }}
         className="max-w-2xl mx-auto glass rounded-3xl p-6 sm:p-8"
       >
         {/* Card header */}
@@ -71,7 +104,7 @@ export default function UploadCard() {
               Review your portfolio
             </h2>
             <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-              Upload a file or paste a URL to get started
+              Upload a file or paste a URL — Claude will do the rest
             </p>
           </div>
         </div>
@@ -84,7 +117,7 @@ export default function UploadCard() {
           {(["file", "url"] as const).map((t) => (
             <button
               key={t}
-              onClick={() => setTab(t)}
+              onClick={() => { setTab(t); setError(null); }}
               className="flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-200"
               style={
                 tab === t
@@ -120,8 +153,11 @@ export default function UploadCard() {
               ref={fileRef}
               type="file"
               className="hidden"
-              accept=".pdf,.png,.jpg,.jpeg,.webp,.html"
-              onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])}
+              accept=".pdf,.png,.jpg,.jpeg,.webp"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) { setFile(f); setError(null); }
+              }}
             />
             <div
               className="w-12 h-12 rounded-2xl flex items-center justify-center"
@@ -150,7 +186,7 @@ export default function UploadCard() {
                   Drop your portfolio here
                 </p>
                 <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                  PDF, PNG, JPG, HTML · up to 20 MB
+                  PDF, PNG, JPG, WEBP · up to 20 MB
                 </p>
               </div>
             )}
@@ -159,12 +195,15 @@ export default function UploadCard() {
 
         {/* URL input */}
         {tab === "url" && (
-          <div className="flex items-center gap-2 rounded-xl px-4 py-3" style={{ background: "var(--muted)", border: "1px solid var(--border)" }}>
+          <div
+            className="flex items-center gap-2 rounded-xl px-4 py-3"
+            style={{ background: "var(--muted)", border: "1px solid var(--border)" }}
+          >
             <Link2 size={15} style={{ color: "var(--muted-foreground)" }} />
             <input
               type="url"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => { setUrl(e.target.value); setError(null); }}
               placeholder="https://yourportfolio.com"
               className="flex-1 bg-transparent text-sm outline-none"
               style={{ color: "var(--foreground)" }}
@@ -215,8 +254,8 @@ export default function UploadCard() {
             <span className="font-normal opacity-60">(optional)</span>
           </label>
           <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
             placeholder="e.g. Focus on storytelling and visual hierarchy for a senior design role at a fintech startup…"
             rows={3}
             className="w-full rounded-xl px-4 py-3 text-sm outline-none resize-none"
@@ -228,16 +267,33 @@ export default function UploadCard() {
           />
         </div>
 
+        {/* Error message */}
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-4 flex items-start gap-2 px-4 py-3 rounded-xl text-sm"
+            style={{
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              color: "#ef4444",
+            }}
+          >
+            <AlertCircle size={15} className="mt-0.5 shrink-0" />
+            {error}
+          </motion.div>
+        )}
+
         {/* Generate button */}
         <button
           onClick={handleGenerate}
-          disabled={(!file && !url) || loading}
+          disabled={!canSubmit}
           className="glow-button animate-shimmer mt-5 w-full flex items-center justify-center gap-2 h-12 rounded-xl text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none"
         >
           {loading ? (
             <>
               <Loader2 size={15} className="animate-spin" />
-              Analyzing your portfolio…
+              Claude is reviewing your portfolio…
             </>
           ) : (
             <>
@@ -246,6 +302,15 @@ export default function UploadCard() {
             </>
           )}
         </button>
+
+        {loading && (
+          <p
+            className="mt-3 text-center text-xs"
+            style={{ color: "var(--muted-foreground)" }}
+          >
+            This usually takes 15–30 seconds
+          </p>
+        )}
       </motion.div>
     </section>
   );

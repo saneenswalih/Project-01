@@ -67,7 +67,7 @@ function ScoreRing({ score }: { score: number }) {
         initial={{ strokeDashoffset: circumference }}
         whileInView={{ strokeDashoffset: offset }}
         viewport={{ once: true }}
-        transition={{ duration: 1.2, delay: 0.3, ease: "easeOut" }}
+        transition={{ duration: 1.2, delay: 0.3, ease: "easeOut" as const }}
       />
     </svg>
   );
@@ -124,7 +124,7 @@ export default function HowItWorks() {
               initial={{ opacity: 0, y: 24 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, amount: 0.2 }}
-              transition={{ duration: 0.55, delay: i * 0.08, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.55, delay: i * 0.08, ease: "easeOut" as const }}
               onClick={() => setActiveStep(i)}
               className="relative rounded-2xl p-5 cursor-pointer transition-all duration-300 group"
               style={{
@@ -191,7 +191,7 @@ export default function HowItWorks() {
           initial={{ opacity: 0, y: 32 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, amount: 0.15 }}
-          transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+          transition={{ duration: 0.7, ease: "easeOut" as const }}
           className="glass rounded-3xl overflow-hidden"
         >
           <div className="grid grid-cols-1 lg:grid-cols-2">
@@ -254,7 +254,7 @@ export default function HowItWorks() {
                         initial={{ width: 0 }}
                         whileInView={{ width: `${s.score}%` }}
                         viewport={{ once: true }}
-                        transition={{ duration: 0.9, delay: 0.2, ease: "easeOut" }}
+                        transition={{ duration: 0.9, delay: 0.2, ease: "easeOut" as const }}
                       />
                     </div>
                   </div>
